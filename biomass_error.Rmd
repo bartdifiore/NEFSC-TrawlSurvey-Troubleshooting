@@ -1,0 +1,234 @@
+---
+title: "Zero Biomass Issue"
+author: "Bart DiFiore"
+date: "2024-05-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( echo = F, warning=F, message=F)
+```
+
+
+```{r}
+library(tidyverse)
+library(ecodata)
+
+# Paths to Box folder
+#-----------------------------------
+## NEFSC Trawl Survey data
+#-----------------------------------
+
+df <- readRDS("Data/survdat_lw.rds") # From https://github.com/NOAA-EDAB/data-requests/tree/main/EwE-menhaden-AndreBuchheister
+
+nmfs_df_raw <- df$survdat %>%
+  as_tibble()
+
+biomass_err <- nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0)
+
+
+```
+
+Hey all, I wanted to check in with you on the instances in the data set when either:  
+
+  - ABUNDANCE > 0 & BIOMASS == 0 or
+  
+  - ABUNDANCE == 0 & BIOMASS > 0
+
+I have been looking at the gmri_survdat_prep() code. In the most recent file that I have received from Scott, (e..g before running gmri_survdat_prep()), ~9.5% of the unique species by sex observations have abundances > 0 and biomass == 0. Similarly, ~5% of the unique species by sex observations have abundances == 0 and biomass > 0. Thus, in the current code we would be assigning ~15% of adjusted biomass and adjusted abundances with values that are not in the data set.
+
+I spoke with Kathy, and she told me that the rational for adjusting instances where abundance was greater than zero and biomass was zero to 0.001 kg (1 g) was because the balances early on in the survey couldn't handle small values. So the assumption was that when abundance was nonzero and biomass was zero it was likely an issue with trying to weigh a small fish (e.g ~ 1g). This makes sense in terms of the distribution of those occurrences in the dataset (first figure).  
+
+```{r include = T, fig.cap="Histogram of observations with zero biomass and nonzero abundance."}
+
+biomass_err %>%
+  ggplot(aes(x = YEAR))+
+  geom_bar(stat = "count")
+
+
+```
+
+```{r}
+n1 <- nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  filter(LENGTH < 10) %>% dim()
+
+n2 <- nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>% dim()
+# 
+# n1[1]/n2[1]
+
+```
+
+When we look at the lengths of the individuals where abundance is $\neq$ 0 and biomass = 0, `r round((n1[1]/n2[1])*100)`% of the observations are for small individuals (e.g < 10 cm) where we might expect the accuracy of the balance to be an issue. 
+
+However, the remaining observations are obviously not errors with the scaling. Take for example spiny dogfish: 
+
+```{r include = T, fig.cap="Length frequency distribution of spiny dogfish for which biomass was assigned zero."}
+nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  group_by(SVSPP, LENGTH) %>% 
+  summarize(tot = sum(NUMLEN)) %>% 
+  left_join(ecodata::species_groupings %>% 
+              select(SVSPP, COMNAME, SCINAME) %>% distinct()) %>%
+  filter(COMNAME == "SPINY DOGFISH") %>% 
+  ggplot(aes(x = LENGTH))+
+  geom_bar(aes(y = tot), stat = "identity")+
+  labs(y = "Total observed individuals")
+
+
+```
+Considering the instances of biomass == 0 occur more frequently in the 1970's and 1980's a feel like this could lead to very real biases if for instance one was to build a SDM for dogfish. So I guess my main question is: do you think this is an issue we should try and correct? (e.g. use the dogfish L-W relationship to back track biomass) Does anyone know how NOAA NEFSC folks are making these corrections? And is assuming all these instances the individuals are 1 g worse than the alternative of leaving biomass at zero (or maybe NA)? 
+
+Just to give you all an indication of which species are the biggest worries, here are the species with the most instances of biomass == 0 and length > 10. 
+
+
+```{r include = T, fig.cap="Number of individuals observed that were larger than 10 cm and had biomass assigned to be zero by species. Here I'm just showing the species with more than 1000 occurances."}
+nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  filter(LENGTH > 10) %>%
+  group_by(SVSPP) %>% 
+  summarize(tot = sum(NUMLEN)) %>% 
+  left_join(ecodata::species_groupings %>% 
+              select(SVSPP, COMNAME, SCINAME) %>% distinct()) %>%
+  arrange(desc(tot)) %>% 
+  filter(tot> 1000) %>%
+  ggplot(aes(x = forcats::fct_reorder(COMNAME, tot, .desc = T)))+
+  geom_bar(aes(y = tot), stat = "identity")+
+  labs(y = "Total observed individuals\n(Biomass == 0 & length > 10 cm)", x = "")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1))
+
+```
+
+```{r include=T, fig.cap="Length frequeny distributions of the species that occur most commonly (in any size class) in the data where abundance > 0 and biomass = 0."}
+
+spp_sub <- nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  group_by(SVSPP) %>% 
+  summarize(tot = sum(NUMLEN, na.rm = T)) %>% 
+  left_join(ecodata::species_groupings %>% 
+              select(SVSPP, COMNAME, SCINAME) %>% distinct()) %>%
+  arrange(desc(tot)) %>% 
+  slice_max(tot, n = 10) %>%
+  distinct(COMNAME)
+spp_sub <- as.vector(spp_sub$COMNAME)
+
+
+
+
+nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  group_by(SVSPP, LENGTH) %>% 
+  summarize(tot = sum(NUMLEN, na.rm = T)) %>% 
+  left_join(ecodata::species_groupings %>% 
+              select(SVSPP, COMNAME, SCINAME) %>% distinct()) %>%
+  filter(COMNAME %in% spp_sub) %>%
+  mutate(length = round(LENGTH)) %>%
+  ggplot(aes(x = length))+
+  geom_bar(aes(y = tot), stat = "identity")+
+  labs(y = "Total observed individuals")+
+  facet_wrap(~COMNAME, scales = "free")
+
+
+
+
+
+
+```
+
+
+```{r include = T, fig.cap="Length-frequency distribution for all occurances where abundance was >0 and biomass =0. The largest individual was a basking shark (>600 cm)."}
+
+nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  group_by(LENGTH) %>%
+  summarize(tot = sum(NUMLEN, na.rm = T)) %>% 
+  mutate(length = round(LENGTH)) %>%
+  ggplot(aes(x = length))+
+  geom_bar(aes(y = tot), stat = "identity")+
+  labs(y = "Total observed individuals")
+
+```
+
+
+```{r include = T, fig.cap="Zoom in from previous figure for 0-100 length cm classes. Larger classes are truncated."}
+
+nmfs_df_raw %>% 
+  select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  group_by(LENGTH) %>%
+  summarize(tot = sum(NUMLEN, na.rm = T)) %>% 
+  mutate(length = round(LENGTH)) %>%
+  ggplot(aes(x = length))+
+  geom_bar(aes(y = tot), stat = "identity")+
+  coord_cartesian(xlim = c(0, 100))+
+  labs(y = "Total observed individuals")
+
+```
+
+```{r include = T, fig.cap = "Biomass that could be potentially missed summed across years. Notice the distinct spike in 1980."}
+
+# Estimate weight at length for each species where biomass = 0. 
+
+nmfs_df_raw %>% 
+  dplyr::select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH, WGTLEN) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  rename_all(tolower) %>%
+  group_by(year) %>% 
+  summarize(total_missed_biomass = sum(wgtlen, na.rm = T)) %>%
+  ggplot(aes(x = year, y = total_missed_biomass))+
+  geom_line()+
+  labs(y = "Total biomass missed (kg)")
+
+
+
+```
+
+
+```{r include = T, fig.cap = "Distrubtion of total missed biomass by length class across all species. Truncated at 150 cm for visualization purposes."}
+
+
+nmfs_df_raw %>% 
+  dplyr::select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH, WGTLEN) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  rename_all(tolower) %>%
+  mutate(length_1cm_classes = round(length)) %>%
+  group_by(length_1cm_classes) %>% 
+  summarize(total_missed_biomass_by_length = sum(wgtlen, na.rm = T)) %>%
+  ggplot(aes(x = length_1cm_classes, y = total_missed_biomass_by_length))+
+  geom_bar(stat = "identity")+
+  coord_cartesian(xlim = c(0, 150), ylim = c(0, 800))+
+  labs(y = "Total biomass missed (kg)")
+
+```
+
+```{r include = T, fig.cap = "Total missed biomass by species for 1980."}
+
+nmfs_df_raw %>% 
+  dplyr::select(SVSPP, CATCHSEX, CRUISE6, STATION, STRATUM, TOW, YEAR, SEASON, ABUNDANCE, BIOMASS, NUMLEN, LENGTH, WGTLEN) %>% 
+  filter(ABUNDANCE > 0 & BIOMASS == 0) %>%
+  left_join(ecodata::species_groupings %>% 
+            select(SVSPP, COMNAME, SCINAME) %>% distinct()) %>%
+  rename_all(tolower) %>%
+  filter(year == 1980) %>%
+  group_by(comname) %>% 
+  summarize(total_by_species = sum(wgtlen, na.rm = T)) %>% 
+  arrange(desc(total_by_species)) %>%
+  filter(total_by_species >= 2) %>%
+  ggplot(aes(x = forcats::fct_reorder(comname, total_by_species, .desc = T), y = total_by_species))+
+  geom_bar(aes(y = total_by_species), stat = "identity")+
+  labs(x = "")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1))
+
+
+```
+
